@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Petal Waterfall</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body { background: #000; font: 11px/1.3 system-ui, sans-serif; color: #ddd; }
+  canvas { display: block; }
+
+  /* Settings gear: appears when the mouse is over the strip */
+  #gear { position: fixed; right: 8px; bottom: 8px; width: 28px; height: 28px; border-radius: 50%;
+          background: rgba(0,0,0,0.55); border: 1px solid rgba(255,255,255,0.25); color: #fff;
+          display: flex; align-items: center; justify-content: center; font-size: 16px; cursor: pointer;
+          opacity: 0; transition: opacity 0.25s; user-select: none; z-index: 5; }
+  body:hover #gear, #gear.open { opacity: 1; }
+
+  /* Panel */
+  #panel { position: fixed; left: 0; right: 0; bottom: 0; max-height: 92vh; overflow-y: auto;
+           background: rgba(10,10,14,0.88); border-top: 1px solid rgba(255,255,255,0.15);
+           padding: 10px 10px 44px; box-sizing: border-box; z-index: 4; backdrop-filter: blur(6px); }
+  #panel[hidden] { display: none; }
+  #panel label { display: block; margin: 8px 0 2px; color: #aaa; text-transform: uppercase; letter-spacing: 0.06em; font-size: 9.5px; }
+  #panel input[type=range] { width: 100%; margin: 0; accent-color: #ff7ab8; }
+  #panel .rowv { display: flex; justify-content: space-between; align-items: baseline; }
+  #panel .rowv span { color: #fff; font-variant-numeric: tabular-nums; }
+  .swatches { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .sw { height: 22px; border-radius: 5px; border: 2px solid transparent; cursor: pointer; }
+  .sw.on { border-color: #fff; }
+  #bgrow { display: flex; align-items: center; gap: 8px; }
+  #bg { width: 34px; height: 22px; border: none; padding: 0; background: none; cursor: pointer; }
+  #reset { margin-top: 12px; width: 100%; padding: 6px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.25);
+           background: transparent; color: #ccc; cursor: pointer; }
+
+  /* Speed dial */
+  #dial { display: flex; align-items: center; gap: 12px; margin-top: 2px; }
+  #knob { width: 84px; height: 84px; flex: none; cursor: ns-resize; touch-action: none; user-select: none; }
+  #knob circle.track { fill: rgba(255,255,255,0.06); stroke: rgba(255,255,255,0.18); stroke-width: 2; }
+  #knob path.arc { fill: none; stroke: #ff7ab8; stroke-width: 5; stroke-linecap: round; }
+  #knob line.ind { stroke: #fff; stroke-width: 3; stroke-linecap: round; }
+  #speedVal { font-size: 22px; color: #fff; font-variant-numeric: tabular-nums; }
+  #dialHint { color: #888; font-size: 10px; }
+</style>
+<!--THREE-->
+</head>
+<body>
+<div id="gear" title="Settings">&#9881;</div>
+<div id="panel" hidden>
+  <label>Speed</label>
+  <div id="dial">
+    <svg id="knob" viewBox="0 0 100 100">
+      <circle class="track" cx="50" cy="50" r="42"></circle>
+      <path class="arc" id="arc" d=""></path>
+      <line class="ind" id="ind" x1="50" y1="50" x2="50" y2="14"></line>
+    </svg>
+    <div><div id="speedVal">1.0×</div><div id="dialHint">drag up/down<br>or scroll</div></div>
+  </div>
+
+  <label>Colors</label>
+  <div class="swatches" id="swatches"></div>
+  <div id="hueRow"><label>Hue</label><input type="range" id="hue" min="0" max="360" step="1"></div>
+
+  <div class="rowv"><label>Petals</label><span id="countVal"></span></div>
+  <input type="range" id="count" min="200" max="10000" step="100">
+  <div class="rowv"><label>Size</label><span id="sizeVal"></span></div>
+  <input type="range" id="size" min="0.4" max="2.5" step="0.05">
+  <div class="rowv"><label>Flutter</label><span id="flutterVal"></span></div>
+  <input type="range" id="flutter" min="0" max="3" step="0.05">
+  <div class="rowv"><label>Wind</label><span id="windVal"></span></div>
+  <input type="range" id="wind" min="-2" max="2" step="0.05">
+  <label>Background</label>
+  <div id="bgrow"><input type="color" id="bg"><span id="bgVal"></span></div>
+  <button id="reset">Reset to defaults</button>
+</div>
+
+<script>
+// Self-contained wallpaper build: three.js is embedded above, no network needed.
+// Petal waterfall with a live settings panel. Settings persist in localStorage and
+// sync to every other open strip through a BroadcastChannel (same browser profile).
+
+// ---------- Settings ----------
+const DEFAULTS = { speed: 1, palette: 'warm', hue: 330, count: 5000, size: 1, flutter: 0.25, wind: 0, bg: '#000000' };
+const PALETTES = {
+  warm:    { name: 'Warm',    css: 'linear-gradient(90deg,#ff3fa0,#ff2a2a,#ff8a00,#ffd400)', color: () => [ (0.85 + Math.random() * 0.31) % 1, 1.0, 0.55 + Math.random() * 0.1 ] },
+  sakura:  { name: 'Sakura',  css: 'linear-gradient(90deg,#ffd6e8,#ff9ecb,#ffc4dd)',          color: () => [ 0.92 + Math.random() * 0.05, 0.6 + Math.random() * 0.2, 0.72 + Math.random() * 0.14 ] },
+  rainbow: { name: 'Rainbow', css: 'linear-gradient(90deg,#f00,#ff0,#0f0,#0ff,#00f,#f0f)',    color: () => [ Math.random(), 0.95, 0.55 + Math.random() * 0.1 ] },
+  autumn:  { name: 'Autumn',  css: 'linear-gradient(90deg,#8a2a05,#d2521a,#e8a020)',          color: () => [ 0.02 + Math.random() * 0.1, 0.8 + Math.random() * 0.2, 0.38 + Math.random() * 0.17 ] },
+  ocean:   { name: 'Ocean',   css: 'linear-gradient(90deg,#0b6fb8,#19c3d8,#5be0c8)',          color: () => [ 0.5 + Math.random() * 0.15, 0.7 + Math.random() * 0.2, 0.5 + Math.random() * 0.2 ] },
+  forest:  { name: 'Forest',  css: 'linear-gradient(90deg,#1f6b2a,#4caf50,#a8d86a)',          color: () => [ 0.25 + Math.random() * 0.12, 0.55 + Math.random() * 0.3, 0.35 + Math.random() * 0.25 ] },
+  white:   { name: 'White',   css: 'linear-gradient(90deg,#ddd,#fff)',                        color: () => [ 0, 0, 0.85 + Math.random() * 0.15 ] },
+  custom:  { name: 'Hue',     css: 'conic-gradient(#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00)',      color: (S) => [ ((S.hue / 360) + (Math.random() - 0.5) * 0.06 + 1) % 1, 0.9, 0.55 + Math.random() * 0.1 ] },
+};
+let S = { ...DEFAULTS };
+try { Object.assign(S, JSON.parse(localStorage.getItem('petalSettings') || '{}')); } catch (e) {}
+
+const channel = ('BroadcastChannel' in window) ? new BroadcastChannel('petal-settings') : null;
+function saveAndBroadcast() {
+  try { localStorage.setItem('petalSettings', JSON.stringify(S)); } catch (e) {}
+  if (channel) channel.postMessage(S);
+}
+if (channel) channel.onmessage = (e) => { const prev = S; S = { ...DEFAULTS, ...e.data }; applySettings(prev); syncUI(); };
+
+// ---------- 1. Scene setup ----------
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 100);
+camera.position.z = 20;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0xd8b4c8, 1.6));
+const sun = new THREE.DirectionalLight(0xfff4ec, 1.2);
+sun.position.set(3, 5, 6);
+scene.add(sun);
+
+function worldBounds() {
+  const h = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * camera.position.z;
+  return { halfW: (h * camera.aspect) / 2, halfH: h / 2 };
+}
+let bounds = worldBounds();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  bounds = worldBounds();
+});
+
+// ---------- 2. Petal geometry and material ----------
+function petalGeometry() {
+  const s = new THREE.Shape();
+  s.moveTo(0, -0.5);
+  s.bezierCurveTo(0.42, -0.35, 0.46, 0.2, 0.14, 0.5);
+  s.lineTo(0, 0.36);
+  s.lineTo(-0.14, 0.5);
+  s.bezierCurveTo(-0.46, 0.2, -0.42, -0.35, 0, -0.5);
+  const geo = new THREE.ShapeGeometry(s, 10);
+  const p = geo.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i);
+    p.setZ(i, 0.18 * x * x);
+  }
+  geo.computeVertexNormals();
+  return geo;
+}
+
+const material = new THREE.MeshLambertMaterial({
+  color: 0xffffff,
+  side: THREE.DoubleSide,
+  transparent: true,
+  opacity: 0.92,
+  depthWrite: false,
+});
+
+// ---------- 3. Instanced mesh ----------
+const MAX = 10000;                       // capacity; the live count is a setting
+const mesh = new THREE.InstancedMesh(petalGeometry(), material, MAX);
+mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+scene.add(mesh);
+
+const tint = new THREE.Color();
+function recolor() {
+  const pal = PALETTES[S.palette] || PALETTES.warm;
+  for (let i = 0; i < MAX; i++) {
+    const [h, s, l] = pal.color(S);
+    tint.setHSL(h, s, l);
+    mesh.setColorAt(i, tint);
+  }
+  mesh.instanceColor.needsUpdate = true;
+}
+recolor();
+
+// ---------- 4. Per-petal simulation state ----------
+const pos    = new Float32Array(MAX * 3);
+const vel    = new Float32Array(MAX * 3);
+const rot    = new Float32Array(MAX * 3);
+const angVel = new Float32Array(MAX * 3);
+const size   = new Float32Array(MAX);
+const phase  = new Float32Array(MAX);
+const freq   = new Float32Array(MAX);
+
+const DEPTH = 3;
+
+function spawn(i, anywhere) {
+  const j = i * 3;
+  pos[j]     = (Math.random() * 2 - 1) * (bounds.halfW + 2);
+  pos[j + 1] = anywhere ? (Math.random() * 2 - 1) * bounds.halfH
+                        : bounds.halfH + 1 + Math.random() * 4;
+  pos[j + 2] = (Math.random() * 2 - 1) * DEPTH;
+  vel[j]     = (Math.random() - 0.5) * 0.1;
+  vel[j + 1] = -(1.125 + Math.random() * 1.125);
+  vel[j + 2] = 0;
+  rot[j]     = Math.random() * Math.PI * 2;
+  rot[j + 1] = Math.random() * Math.PI * 2;
+  rot[j + 2] = Math.random() * Math.PI * 2;
+  angVel[j]     = (Math.random() - 0.5) * 8;
+  angVel[j + 1] = (Math.random() - 0.5) * 8;
+  angVel[j + 2] = (Math.random() - 0.5) * 5;
+  size[i]  = 0.22 + Math.random() * 0.22;
+  phase[i] = Math.random() * Math.PI * 2;
+  freq[i]  = 0.8 + Math.random() * 1.4;
+}
+for (let i = 0; i < MAX; i++) spawn(i, true);
+
+// ---------- 6. Mouse mapping (screen px -> world units on z = 0 plane) ----------
+const cursor = new THREE.Vector2(1e6, 1e6);
+addEventListener('mousemove', (e) => {
+  const nx = (e.clientX / innerWidth) * 2 - 1;
+  const ny = -(e.clientY / innerHeight) * 2 + 1;
+  cursor.set(nx * bounds.halfW, ny * bounds.halfH);
+});
+document.addEventListener('mouseout', (e) => { if (!e.relatedTarget) cursor.set(1e6, 1e6); });
+
+// ---------- 5. Update loop ----------
+const GRAVITY       = 1.875;
+const TERMINAL      = 2.25;
+const REPEL_RADIUS  = 4.0;
+const REPEL_SPEED   = 14;
+const REPEL_NUDGE   = 0.8;
+const FILL_REACH    = 12;     // how far below the arrow the wake keeps closing (world units)
+const FILL_PULL     = 5;      // strength of the drift back toward the arrow's column
+const DAMPING       = 0.985;
+
+const dummy = new THREE.Object3D();
+const clock = new THREE.Clock();
+const R2 = REPEL_RADIUS * REPEL_RADIUS;
+
+function update(dt, t) {
+  const damp = Math.pow(DAMPING, dt * 60);
+  const n = Math.min(S.count, MAX);
+  for (let i = 0; i < n; i++) {
+    const j = i * 3;
+
+    vel[j + 1] -= GRAVITY * dt;
+    if (vel[j + 1] < -TERMINAL) vel[j + 1] = -TERMINAL;
+
+    const sway = Math.sin(t * freq[i] + phase[i]);
+    vel[j] += (S.wind + sway * S.flutter) * dt;
+
+    const dx = pos[j] - cursor.x;
+    const dy = pos[j + 1] - cursor.y;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < R2) {
+      // Above and beside the arrow: slide sideways around it. Once past the tip
+      // (below centre) petals are left alone so they can start closing in.
+      if (dy > -0.35 * REPEL_RADIUS) {
+        const d = Math.sqrt(d2);
+        const f = (1 - d / REPEL_RADIUS) ** 2;
+        const side = Math.abs(dx) > 0.05 ? Math.sign(dx) : (phase[i] < Math.PI ? 1 : -1);
+        pos[j] += side * REPEL_SPEED * f * dt;
+        vel[j] += side * REPEL_NUDGE * f * dt;
+      }
+    } else if (dy < 0 && dy > -FILL_REACH && Math.abs(dx) < REPEL_RADIUS * 1.6) {
+      // Below the arrow: drift back toward its column so the wake fills in.
+      const fy = 1 + dy / FILL_REACH;                          // 1 just under the arrow, 0 at FILL_REACH
+      const fx = Math.min(1, Math.abs(dx) / REPEL_RADIUS);     // fades out as the column closes
+      vel[j] -= Math.sign(dx) * FILL_PULL * fy * fx * dt;
+    }
+
+    vel[j] *= damp;
+    vel[j + 1] *= damp;
+    pos[j]     += vel[j] * dt;
+    pos[j + 1] += vel[j + 1] * dt;
+    rot[j]     += angVel[j] * dt;
+    rot[j + 1] += angVel[j + 1] * dt;
+    rot[j + 2] += angVel[j + 2] * dt;
+
+    if (pos[j + 1] < -bounds.halfH - 1) spawn(i, false);
+    if (pos[j] >  bounds.halfW + 2) pos[j] = -bounds.halfW - 2;
+    if (pos[j] < -bounds.halfW - 2) pos[j] =  bounds.halfW + 2;
+
+    dummy.position.set(pos[j], pos[j + 1], pos[j + 2]);
+    dummy.rotation.set(rot[j], rot[j + 1], rot[j + 2]);
+    dummy.scale.setScalar(size[i] * S.size);
+    dummy.updateMatrix();
+    mesh.setMatrixAt(i, dummy.matrix);
+  }
+  mesh.count = n;
+  mesh.instanceMatrix.needsUpdate = true;
+}
+
+// ---------- 7. Render ----------
+let simTime = 0;
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05) * S.speed;   // the speed dial scales time
+  simTime += dt;
+  update(dt, simTime);
+  renderer.render(scene, camera);
+});
+
+// ---------- 8. Settings panel ----------
+const $ = (id) => document.getElementById(id);
+const gear = $('gear'), panel = $('panel');
+gear.addEventListener('click', () => { panel.hidden = !panel.hidden; gear.classList.toggle('open', !panel.hidden); });
+addEventListener('keydown', (e) => { if (e.key === 's' || e.key === 'Escape') { panel.hidden = e.key === 'Escape' ? true : !panel.hidden; gear.classList.toggle('open', !panel.hidden); } });
+
+function applySettings(prev) {
+  renderer.setClearColor(S.bg, 1);
+  document.body.style.background = S.bg;
+  if (!prev || prev.palette !== S.palette || prev.hue !== S.hue) recolor();
+}
+function set(key, value) { const prev = { ...S }; S[key] = value; applySettings(prev); saveAndBroadcast(); }
+
+// Speed dial: drag up/down or scroll. 0.1x to 3x over a 270 degree sweep.
+const SPEED_MIN = 0.1, SPEED_MAX = 3;
+function drawKnob() {
+  const f = (S.speed - SPEED_MIN) / (SPEED_MAX - SPEED_MIN);
+  const a0 = -135, a1 = -135 + 270 * f;                        // degrees, 0 = up
+  const pt = (deg, r) => { const rad = (deg - 90) * Math.PI / 180; return [50 + r * Math.cos(rad), 50 + r * Math.sin(rad)]; };
+  const [sx, sy] = pt(a0, 36), [ex, ey] = pt(a1, 36);
+  $('arc').setAttribute('d', `M ${sx} ${sy} A 36 36 0 ${a1 - a0 > 180 ? 1 : 0} 1 ${ex} ${ey}`);
+  const [ix, iy] = pt(a1, 30);
+  $('ind').setAttribute('x2', ix); $('ind').setAttribute('y2', iy);
+  $('speedVal').textContent = S.speed.toFixed(S.speed < 1 ? 2 : 1) + '×';
+}
+function setSpeed(v) { set('speed', Math.round(Math.min(SPEED_MAX, Math.max(SPEED_MIN, v)) * 100) / 100); drawKnob(); }
+{
+  const knob = $('knob');
+  let dragging = false, startY = 0, startSpeed = 1;
+  knob.addEventListener('pointerdown', (e) => { dragging = true; startY = e.clientY; startSpeed = S.speed; knob.setPointerCapture(e.pointerId); });
+  knob.addEventListener('pointermove', (e) => { if (dragging) setSpeed(startSpeed + (startY - e.clientY) / 120 * (SPEED_MAX - SPEED_MIN)); });
+  knob.addEventListener('pointerup', () => { dragging = false; });
+  knob.addEventListener('wheel', (e) => { e.preventDefault(); setSpeed(S.speed - Math.sign(e.deltaY) * 0.1); }, { passive: false });
+  knob.addEventListener('dblclick', () => setSpeed(1));
+}
+
+// Palette swatches
+const swatches = $('swatches');
+for (const [key, p] of Object.entries(PALETTES)) {
+  const b = document.createElement('div');
+  b.className = 'sw'; b.title = p.name; b.style.background = p.css; b.dataset.key = key;
+  b.addEventListener('click', () => { set('palette', key); syncUI(); });
+  swatches.appendChild(b);
+}
+
+// Sliders and pickers
+const bind = (id, key, fmt) => {
+  const el = $(id), out = $(id + 'Val');
+  el.addEventListener('input', () => { const v = el.type === 'color' ? el.value : parseFloat(el.value); set(key, v); if (out) out.textContent = fmt(v); });
+};
+bind('hue', 'hue', (v) => v + '°');
+bind('count', 'count', (v) => v);
+bind('size', 'size', (v) => v.toFixed(2) + '×');
+bind('flutter', 'flutter', (v) => v.toFixed(2));
+bind('wind', 'wind', (v) => v.toFixed(2));
+bind('bg', 'bg', (v) => v);
+$('reset').addEventListener('click', () => { const prev = { ...S }; S = { ...DEFAULTS }; applySettings(prev); saveAndBroadcast(); syncUI(); });
+
+function syncUI() {
+  drawKnob();
+  for (const b of swatches.children) b.classList.toggle('on', b.dataset.key === S.palette);
+  $('hueRow').style.display = S.palette === 'custom' ? '' : 'none';
+  $('hue').value = S.hue;
+  $('count').value = S.count;   $('countVal').textContent = S.count;
+  $('size').value = S.size;     $('sizeVal').textContent = S.size.toFixed(2) + '×';
+  $('flutter').value = S.flutter; $('flutterVal').textContent = S.flutter.toFixed(2);
+  $('wind').value = S.wind;     $('windVal').textContent = S.wind.toFixed(2);
+  $('bg').value = S.bg;         $('bgVal').textContent = S.bg;
+}
+applySettings(null);
+syncUI();
+</script>
+</body>
+</html>
